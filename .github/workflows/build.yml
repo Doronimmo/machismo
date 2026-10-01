@@ -1,0 +1,82 @@
+name: Build LuaJIT
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'LuaJIT branch or tag to checkout (leave empty for default)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  actions: write
+  
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          
+      - name: Checkout specific LuaJIT ref
+        if: inputs.ref != ''
+        run: |
+          cd extern/LuaJIT
+          git fetch --all
+          git checkout ${{ inputs.ref }}
+
+      - name: Build LuaJIT via Portmaster Container
+        run: |
+          chmod +x scripts/build-luajit.sh
+          
+          # Run the build script inside the Portmaster builder container
+          docker run --rm \
+            -v "$PWD":/workspace \
+            -w /workspace \
+            -e LUAJIT_MCPU="cortex-a35" \
+            --user $(id -u):$(id -g) \
+            ghcr.io/monkeyx-net/portmaster-build-templates/portmaster-builder:aarch64-latest \
+            ./scripts/build-luajit.sh
+          
+          cd build-luajit
+          tar -czvf luajit-aarch64.tar.gz lib/ share/ luajit
+          
+      - uses: actions/upload-artifact@v7
+        with:
+          name: artifact-aarch64
+          path: build-luajit/*.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          
+      - name: Checkout specific LuaJIT ref
+        if: inputs.ref != ''
+        run: |
+          cd extern/LuaJIT
+          git fetch --all
+          git checkout ${{ inputs.ref }}
+      
+      - uses: actions/download-artifact@v7
+        with:
+          path: release_assets
+          merge-multiple: true
+        
+      - name: Determine Release Name
+        id: version
+        run: |
+          cd extern/LuaJIT
+          LUAJIT_VER=$(git describe --tags --always)
+          echo "VERSION=$LUAJIT_VER" >> $GITHUB_ENV
+      
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ env.VERSION }}" --title "${{ env.VERSION }}" --notes "Automated LuaJIT build for aarch64 (Cortex-A35)" || true
+          gh release edit "${{ env.VERSION }}" --notes "Automated LuaJIT build for aarch64 (Cortex-A35)"
+          gh release upload "${{ env.VERSION }}" release_assets/*.tar.gz --clobber
